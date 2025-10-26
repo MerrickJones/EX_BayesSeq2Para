@@ -1,186 +1,258 @@
-# Sequential Bayesian Updating for 1‑D Consolidation (Grid Posterior, Lognormal Priors)
+# Bayesian Updating for One-Dimensional Consolidation (Grid Posterior, Lognormal Priors)
 
-This repository provides a **comprehensive and transparent example** of Bayesian updating for the one‑dimensional consolidation problem in geotechnical engineering.  
-It demonstrates how to sequentially update soil parameters using settlement observations, showing **how information from monitoring data progressively refines model uncertainty**.
+This repository provides a **comprehensive and transparent example** of Bayesian updating for the one-dimensional consolidation problem in geotechnical engineering.  
+It demonstrates how field monitoring data can be used to **progressively update soil parameters** controlling consolidation behaviour, showing how Bayesian inference systematically reduces uncertainty.
 
-The implementation uses a **grid‑based Bayesian approach**—completely reproducible and visualized step‑by‑step—ideal for teaching, research, and verification of more advanced stochastic or MCMC‑based frameworks.
-
----
-
-## 🔍 Overview
-
-The procedure estimates the two key parameters controlling settlement in soft clays:
-
-- **Coefficient of volume compressibility** \(m_v\) \([\text{kPa}^{-1}]\)
-- **Coefficient of consolidation** \(c_v\) \([\text{m}^2/\text{day}]\)
-
-These parameters are treated as **random variables** with independent **lognormal priors**. As field settlement data \(y_i\) become available at times \(t_i\), Bayesian inference updates their probability distributions.
-
-### Governing equations
-
-**1‑D Consolidation settlement:**
-
-\[
-s(t; m_v, c_v) = 110{,}000\, m_v \, U(T_v), \quad 
-U(T_v) = 1 - \frac{8}{\pi^2}\,\exp\!\Big(-\frac{\pi^2}{4}\,T_v\Big), \quad
-T_v = \frac{c_v t}{(H/2)^2}
-\]
-
-Where:  
-- \(H = 5\,\text{m}\) → \(H/2 = 2.5\,\text{m}\)  
-- \(\Delta \sigma' = 22\,\text{kPa}\)  
-- \(\sigma_e = 3\,\text{mm}\) (measurement noise)
-
-**Bayesian updating equation:**
-
-\[
-p(\theta \mid \mathbf{y}) \propto
-\Bigg[ \prod_i \phi\!\left(\frac{y_i - s(t_i;\theta)}{\sigma_e}\right) \Bigg] p(\theta),
-\quad \theta = (m_v, c_v)
-\]
-
-where \(\phi(\cdot)\) is the standard normal probability density function.
+The implementation uses a **grid-based Bayesian approach**—a deterministic alternative to MCMC—making the inference process fully reproducible and easy to visualise.
 
 ---
 
-## 🧩 Implementation Summary
+## 🧩 Overview
 
-| Step | Description |
-|------|--------------|
-| **1. Define grid** | Construct a 161×161 log‑spaced grid of \((m_v, c_v)\). |
-| **2. Compute priors** | Evaluate independent lognormal PDFs for \(m_v\) and \(c_v\). |
-| **3. Compute likelihood** | For each grid point, compute settlement \(s(t_i;\theta)\) and likelihood \(\phi((y_i - s)/\sigma_e)\). |
-| **4. Form posterior** | Multiply prior and likelihood; normalize with log‑sum‑exp for numerical stability. |
-| **5. Posterior statistics** | Compute posterior mean, MAP (mode), marginals, and 95% credible intervals. |
-| **6. Sequential updating** | Repeat for \(k=1\), \(2\), \(3\), \(4\) observations to illustrate uncertainty reduction. |
-| **7. Visualization** | Produce 2‑D and 3‑D posteriors, marginal plots, and parameter evolution tables. |
+The program performs sequential Bayesian updating for the parameters governing primary settlement of soft clay soils:
+
+$$
+\begin{aligned}
+m_v &= \text{coefficient of volume compressibility }(1/\mathrm{kPa}) \\
+c_v &= \text{coefficient of vertical consolidation }(\mathrm{m^2/day})
+\end{aligned}
+$$
+
+Both parameters are treated as random variables with **independent lognormal priors**.  
+As settlement measurements \(y_i\) are obtained at times \(t_i\), their joint posterior distribution is updated according to Bayes’ theorem.
 
 ---
 
-## 🖥️ Running the Example
+## ⚙️ Forward Consolidation Model
 
-### Requirements
+The settlement of a clay layer of thickness \(H = 5\,\mathrm{m}\) under an effective stress increment \(\Delta\sigma' = 22\,\mathrm{kPa}\) is computed using the first-term approximation of Terzaghi’s 1-D consolidation theory:
+
+$$
+\begin{aligned}
+s(t; m_v, c_v) &= 110{,}000\,m_v\,U(T_v) \\
+U(T_v) &= 1 - \frac{8}{\pi^2}\exp\!\left(-\frac{\pi^2}{4}\,T_v\right) \\
+T_v &= \frac{c_v\,t}{(H/2)^2}
+\end{aligned}
+$$
+
+The model assumes **double drainage** (\(H_d = H/2 = 2.5\,\mathrm{m}\)) and expresses settlement in millimetres.  
+For small-strain primary consolidation, this approximation is accurate and computationally efficient.
+
+---
+
+## 🧠 Bayesian Formulation
+
+### Likelihood Function
+
+Each measured settlement \(y_i\) is assumed to be normally distributed about the model prediction \(s(t_i; m_v, c_v)\):
+
+$$
+\mathcal{L}(\mathbf{y}\,|\,m_v, c_v)
+= \prod_i \frac{1}{\sqrt{2\pi}\sigma_e}
+\exp\!\left[-\frac{(y_i - s(t_i;m_v,c_v))^2}{2\sigma_e^2}\right]
+$$
+
+where \(\sigma_e = 3\,\mathrm{mm}\) represents measurement error.
+
+### Posterior Distribution
+
+The posterior is obtained by combining the likelihood and prior probabilities:
+
+$$
+p(m_v, c_v \mid \mathbf{y}) \propto
+\mathcal{L}(\mathbf{y}\,|\,m_v, c_v)\;
+p(m_v)\,p(c_v)
+$$
+
+Since both priors are lognormal, positivity is enforced automatically.
+
+---
+
+## 🔢 Discrete Grid Implementation
+
+Instead of Monte Carlo sampling, the posterior is computed on a **161 × 161 log-spaced grid** in \((m_v,c_v)\):
+
+1. **Grid definition:**  
+   \(m_v \in [3\times10^{-4},\,3\times10^{-3}]\,1/\mathrm{kPa}\),  
+   \(c_v \in [0.01,\,0.10]\,\mathrm{m^2/day}\)
+
+2. **Prior evaluation:**  
+   \(p(m_v)p(c_v)\) from their respective lognormal PDFs.
+
+3. **Likelihood evaluation:**  
+   For each grid point, compute \(s(t_i;m_v,c_v)\) and the Gaussian likelihood.
+
+4. **Posterior normalization:**  
+   Use **log-sum-exp** to prevent underflow:
+   $$
+   p_{ij} = 
+   \exp\big[(\log p^\text{prior}_{ij} + \log \mathcal{L}_{ij}) - \log Z\big],
+   \quad
+   \log Z = \mathrm{logsumexp}(\log p^\text{prior} + \log \mathcal{L})
+   $$
+
+5. **Posterior statistics:**
+   $$
+   \hat{m}_v = \sum_{ij} p_{ij} m_{v,i}, \qquad
+   \hat{c}_v = \sum_{ij} p_{ij} c_{v,j}
+   $$
+   Marginals and 95 % credible intervals are obtained by summing over rows/columns.
+
+---
+
+## 🔁 Sequential Updating
+
+The updating is performed iteratively for subsets of observations:
+
+| Iteration | Observations Used | Description |
+|------------|------------------|--------------|
+| **k = 1** | first measurement (10 days) | Initial, broad posterior — large uncertainty |
+| **k = 2** | first two (10 + 20 days) | Posterior contracts; early-time rate better constrained |
+| **k = 3** | first three (10 + 20 + 40 days) | Progressive narrowing of credible intervals |
+| **k = 4** | all observations | Final posterior sharply peaked — confident parameter estimates |
+
+---
+
+## 📊 Key Equations
+
+**Bayesian Updating Equation**
+
+$$
+p(\theta|\mathbf{y})
+\propto
+\Bigg[\prod_i
+\phi\!\left(\frac{y_i - s(t_i;\theta)}{\sigma_e}\right)
+\Bigg]p(\theta),
+\qquad
+\theta = (m_v,c_v)
+$$
+
+**Posterior Mean Estimates**
+
+$$
+\hat{m}_v = \sum p_{ij} m_{v,i},
+\qquad
+\hat{c}_v = \sum p_{ij} c_{v,j}
+$$
+
+---
+
+## 🧮 Numerical Features
+
+- **Deterministic grid-posterior** (no random seeds, fully reproducible)  
+- **Log-sum-exp** normalization for numerical stability  
+- **Lognormal priors** ensuring positive soil parameters  
+- **2-D visualizations** of prior, likelihood, unnormalized, and normalized posteriors  
+- **3-D posterior surfaces** with **mean (×)** and **MAP (▲)** markers  
+
+---
+
+## 🖥️ How to Run
+
+### Prerequisites
 
 - Python ≥ 3.9  
 - `numpy`, `pandas`, `matplotlib`
 
-No LaTeX installation is required — all equations are rendered via Matplotlib’s internal mathtext.
+### Execution
 
-### How to Run
+```bash
+python bayes_consolidation_sequential_viz.py
+```
 
-1. Clone this repository or copy the script:
-   ```bash
-   git clone https://github.com/YourUsername/Bayesian_Consolidation.git
-   cd Bayesian_Consolidation
-   ```
-2. Run the main script:
-   ```bash
-   python bayes_consolidation_sequential_viz.py
-   ```
-3. Figures will **automatically display** in the correct order and be saved to:
-   ```
-   ./outputs_bayes_consolidation/
-   ```
+Figures will pop up sequentially and be saved to:
+
+```
+./outputs_bayes_consolidation/
+```
 
 ---
 
-## 📊 Key Outputs (in final display order)
+## 📁 Output Summary (final order)
 
-| Order | File | Description |
-|-------|------|-------------|
-| 1 | `equation_obs4_worked_example.png` | Final 4‑observation worked example |
+| # | File | Description |
+|---|------|-------------|
+| 1 | `equation_obs4_worked_example.png` | Final 4-observation worked example |
 | 2 | `fig_joint_posterior_heatmap.png` | Posterior joint heatmap (all data) |
-| 3 | `k1_post_surface.png` | 3‑D posterior (k=1) — broad, skewed surface |
-| 4 | `k4_post_surface.png` | 3‑D posterior (k=4) — concentrated peak |
-| 5 | `fig_mv_prior_posterior.png` | Prior vs posterior marginal (m_v) |
-| 6 | `fig_cv_prior_posterior.png` | Prior vs posterior marginal (c_v) |
+| 3 | `k1_post_surface.png` | 3-D posterior (k = 1) — broad, skewed surface |
+| 4 | `k4_post_surface.png` | 3-D posterior (k = 4) — concentrated posterior |
+| 5 | `fig_mv_prior_posterior.png` | Prior vs posterior marginal for `m_v` |
+| 6 | `fig_cv_prior_posterior.png` | Prior vs posterior marginal for `c_v` |
 | 7 | `equation_summary.png` | Bayesian updating formula summary |
-| 8 | `param_summary.png` | Final table of prior and posterior parameters |
+| 8 | `param_summary.png` | Table summarizing prior and posterior statistics |
 
-Each intermediate step (`step1_first_obs.png`, `equation_obs1.png`, etc.) shows how new measurements refine uncertainty.
+Intermediate files (`step1_first_obs.png`, etc.) illustrate how uncertainty is reduced with each dataset.
 
 ---
 
 ## 🔬 Interpretation Guide
 
-### Sequential updating
+- **At k = 1:** Posterior is wide and skewed; mean ≠ MAP due to non-symmetry.  
+- **At k = 2–3:** Posterior becomes narrower as new information is assimilated.  
+- **At k = 4:** Posterior peak is sharp; credible intervals minimal — parameters well identified.
 
-- **k=1**: posterior is broad; mean and MAP differ due to skewness.  
-- **k=2–3**: posterior tightens as data reduce uncertainty.  
-- **k=4**: posterior sharply peaks around true parameters, producing a narrow 95% credible interval.
+### Mean vs MAP
 
-### Mean vs MAP distinction
-
-- **MAP (mode)**: highest probability point (peak of the surface).  
-- **Mean (expected value)**: “center of mass” of the surface — sensitive to skewness.  
-- Their difference is visualized explicitly on all 3‑D surfaces.
-
-### Marginal plots
-
-- The marginal PDFs of \(m_v\) and \(c_v\) show how uncertainty collapses relative to the prior.  
-- 95% credible intervals (dotted lines) quantify the posterior range of plausible values.
+- **MAP (mode):** grid point of maximum posterior probability.  
+- **Mean:** expected value (center of mass) of the posterior surface.  
+  Their difference quantifies asymmetry in the posterior distribution.
 
 ---
 
-## ⚙️ Numerical Considerations
+## ⚙️ Numerical Notes
 
-- Posterior normalization uses the **log‑sum‑exp trick** to avoid numerical underflow.  
-- The **grid posterior** approach is exact for low‑dimensional problems and provides interpretable visualizations without stochastic noise.  
-- Priors can be modified to reflect project‑specific knowledge or alternative soil models.
+- Posterior computed entirely in **log-space** (prevents underflow).  
+- Grid-posterior inference provides a **benchmark** for verifying stochastic samplers.  
+- Priors can be modified for case-specific or site-specific soil conditions.
 
 ---
 
-## 📘 Building a Consolidated PDF Report
+## 📘 Build a Consolidated PDF Report
 
-After running the main script, you can compile all generated figures (in order) into a single PDF:
+After running the main script, compile all figures into a single report:
 
 ```bash
 python build_summary_pdf.py
 ```
-This will create:
+
+The report will be generated as:
 
 ```
 outputs_bayes_consolidation/Consolidation_Bayes_Summary.pdf
 ```
 
-The PDF serves as a **visual report** of the entire Bayesian updating process — ideal for teaching, presentations, or supplementary journal material.
-
 ---
 
-## 🧱 Citation & Applications
-
-If you use this repository in academic or professional work, please cite it as:
-
-> *Bayesian Updating for 1‑D Consolidation (2025). Demonstration code for sequential parameter updating using grid‑based posterior inference in geotechnical engineering.*
-
-Applications include:
-- Settlement prediction and back‑analysis of test embankments.  
-- Bayesian calibration of soil models.  
-- Comparison benchmark for MCMC or surrogate‑model Bayesian methods.
-
----
-
-## 👨‍💻 Repository Structure
+## 🧱 Repository Structure
 
 ```
 .
 ├── bayes_consolidation_sequential_viz.py    # Main sequential Bayesian update script
-├── build_summary_pdf.py                     # Combines figures into a single PDF report
+├── build_summary_pdf.py                     # Combines figures into a single PDF
 ├── README.md                                # This file
 └── outputs_bayes_consolidation/             # Folder containing generated figures
 ```
 
 ---
 
-## 💡 Tips for Extending
+## 💡 Extensions
 
-- Replace the first‑term approximation with a multi‑term or large‑strain consolidation model.  
-- Introduce pore pressure data and jointly update mechanical and hydraulic parameters.  
-- Wrap this solver inside an MCMC sampler (e.g., DREAM‑ZS or DE‑Metropolis) for higher‑dimensional inference.
+- Replace the first-term approximation with a multi-term or large-strain consolidation model.  
+- Add pore pressure data for coupled hydraulic–mechanical updating.  
+- Embed this grid solver in an MCMC sampler (e.g., DREAM-ZS) for high-dimensional inference.
 
 ---
 
-**Author:** Merrick Jones — 2025  
-**Affiliation:** University of Newcastle 
-**License:** MIT
+## 📚 Reference
 
+Jones, M. (2025).  
+*Bayesian Updating for One-Dimensional Consolidation: Sequential parameter estimation using a grid-based posterior.*  
+University of Newcastle / BECA Consulting.
+
+---
+
+## 👨‍💻 Author & License
+
+**Author:** Merrick Jones (2025)  
+**Affiliation:** University of Newcastle / BECA Consulting  
+**License:** MIT
