@@ -70,33 +70,39 @@ Since both priors are lognormal, positivity is enforced automatically.
 
 ## 🔢 Discrete Grid Implementation
 
-Instead of Monte Carlo sampling, the posterior is computed on a **161 × 161 log-spaced grid** in \((m_v,c_v)\):
+Instead of Monte Carlo sampling, the posterior is computed on a **161 × 161 log‑spaced grid** in \((m_v,c_v)\):  
 
-1. **Grid definition:**  
-   \(m_v \in [3\times10^{-4},\,3\times10^{-3}]\,1/\mathrm{kPa}\),  
-   \(c_v \in [0.01,\,0.10]\,\mathrm{m^2/day}\)
-
-2. **Prior evaluation:**  
-   \(p(m_v)p(c_v)\) from their respective lognormal PDFs.
-
-3. **Likelihood evaluation:**  
-   For each grid point, compute \(s(t_i;m_v,c_v)\) and the Gaussian likelihood.
-
-4. **Posterior normalization:**  
-   Use **log-sum-exp** to prevent underflow:
+1. **Grid definition**  
+   
    $$
-   p_{ij} = 
-   \exp\big[(\log p^\text{prior}_{ij} + \log \mathcal{L}_{ij}) - \log Z\big],
+   m_v \in [3\times10^{-4},\,3\times10^{-3}]\,\mathrm{(1/kPa)},
    \quad
-   \log Z = \mathrm{logsumexp}(\log p^\text{prior} + \log \mathcal{L})
+   c_v \in [0.01,\,0.10]\,\mathrm{(m^2/day)}
    $$
 
-5. **Posterior statistics:**
+2. **Prior evaluation**  
+   Evaluate independent lognormal PDFs: \(p(m_v)\,p(c_v)\).
+
+3. **Likelihood evaluation**  
+   For each grid point, compute \(s(t_i; m_v, c_v)\) and the Gaussian likelihood term \(\phi((y_i - s)/\sigma_e)\).
+
+4. **Posterior normalization (log‑sum‑exp)**  
+   
    $$
-   \hat{m}_v = \sum_{ij} p_{ij} m_{v,i}, \qquad
-   \hat{c}_v = \sum_{ij} p_{ij} c_{v,j}
+   p_{ij} = \exp\!\left(\big[\log p^{\text{prior}}_{ij} + \log \mathcal{L}_{ij}\big] - \log Z\right),
+   \qquad
+   \log Z = \operatorname{logsumexp}\!\big(\log p^{\text{prior}} + \log \mathcal{L}\big)
    $$
-   Marginals and 95 % credible intervals are obtained by summing over rows/columns.
+
+5. **Posterior statistics**  
+   
+   $$
+   \hat{m}_v = \sum_{i,j} p_{ij}\, m_{v,i},
+   \qquad
+   \hat{c}_v = \sum_{i,j} p_{ij}\, c_{v,j}
+   $$
+   
+   Marginal posteriors (summing over rows/columns) provide 95% credible intervals via discrete quantiles.
 
 ---
 
@@ -239,7 +245,7 @@ outputs_bayes_consolidation/Consolidation_Bayes_Summary.pdf
 
 - Replace the first-term approximation with a multi-term or large-strain consolidation model.  
 - Add pore pressure data for coupled hydraulic–mechanical updating.  
-- Embed this grid solver in an MCMC sampler (e.g., DREAM-ZS) for high-dimensional inference.
+- Embed this grid solver in an MCMC sampler (e.g. DREAM-ZS) for high-dimensional inference.
 
 ---
 
