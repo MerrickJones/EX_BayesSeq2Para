@@ -1,0 +1,11 @@
+Scenario,Time (days),Observed (mm),Prior Prediction (mm),Posterior Prediction (mm)
+step1_first_obs,10.0,49.5,33.9,50.7
+step2_first_two,10.0,49.5,33.9,49.6
+step2_first_two,20.0,61.1,45.0,64.7
+step3_first_three,10.0,49.5,33.9,49.2
+step3_first_three,20.0,61.1,45.0,65.1
+step3_first_three,40.0,86.4,62.6,90.5
+step4_all_four,10.0,49.5,33.9,48.7
+step4_all_four,20.0,61.1,45.0,63.7
+step4_all_four,40.0,86.4,62.6,88.2
+step4_all_four,80.0,116.7,84.8,121.1
