@@ -81,12 +81,16 @@ $$
 
 ### 2. Prior evaluation
 
+$$
 Evaluate independent lognormal PDFs: \( p(m_v)\,p(c_v) \).
+$$
 
 ### 3. Likelihood evaluation
 
+$$
 For each grid point, compute the forward model \( s(t_i; m_v, c_v) \)  
 and the Gaussian likelihood term \( \phi((y_i - s)/\sigma_e) \).
+$$
 
 ### 4. Posterior normalization (log-sum-exp)
 
