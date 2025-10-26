@@ -181,6 +181,6 @@ Applications include:
 ---
 
 **Author:** Merrick Jones — 2025  
-**Affiliation:** University of Newcastle / BECA Consulting  
+**Affiliation:** University of Newcastle 
 **License:** MIT
 
