@@ -49,7 +49,7 @@ Each measured settlement \(y_i\) is assumed to be normally distributed about the
 $$
 \mathcal{L}(\mathbf{y}\,|\,m_v, c_v)
 = \prod_i \frac{1}{\sqrt{2\pi}\sigma_e}
-\exp\!\left[-\frac{(y_i - s(t_i;m_v,c_v))^2}{2\sigma_e^2}\right]
+\exp\\left[-\frac{(y_i - s(t_i;m_v,c_v))^2}{2\sigma_e^2}\right]
 $$
 
 where \(\sigma_e = 3\,\mathrm{mm}\) represents measurement error.
