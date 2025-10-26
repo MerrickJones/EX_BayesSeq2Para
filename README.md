@@ -70,46 +70,70 @@ Since both priors are lognormal, positivity is enforced automatically.
 
 ## 🔢 Discrete Grid Implementation
 
-Instead of Monte Carlo sampling, the posterior is computed on a **161 × 161 log‑spaced grid** in \((m_v,c_v)\):  
+Instead of Monte Carlo sampling, the posterior is computed on a **161 × 161 log-spaced grid** in `(m_v, c_v)`.
+
+---
 
 ### 1. Grid definition
 
+The parameter domains are defined as:
+
 $$
-m_v \in [3\times10^{-4},\,3\times10^{-3}]\,\mathrm{(1/kPa)}, \quad
-c_v \in [0.01,\,0.10]\,\mathrm{(m^2/day)}
+m_v \in [3\times10^{-4},\,3\times10^{-3}]\, (1/\mathrm{kPa}), \quad
+c_v \in [0.01,\,0.10]\, (\mathrm{m^2/day})
 $$
+
+---
 
 ### 2. Prior evaluation
 
+Independent lognormal probability density functions are evaluated as:
+
 $$
-Evaluate independent lognormal PDFs: \( p(m_v)\,p(c_v) \).
+p(m_v, c_v) = p(m_v)\,p(c_v)
 $$
+
+---
 
 ### 3. Likelihood evaluation
 
-$$
 For each grid point, compute the forward model \( s(t_i; m_v, c_v) \)  
-and the Gaussian likelihood term \( \phi((y_i - s)/\sigma_e) \).
+and evaluate the Gaussian likelihood term:
+
 $$
+L_{ij} = \prod_i \phi \Big( \frac{y_i - s(t_i; m_v, c_v)}{\sigma_e} \Big)
+$$
+
+---
 
 ### 4. Posterior normalization (log-sum-exp)
 
+The posterior is formed by multiplying the prior and likelihood, then normalizing:
+
 $$
 p_{ij} =
-\exp \Big( [\ln p^{prior}_{ij} + \ln L_{ij}] - \ln Z \Big),
-\qquad
+\exp \Big( [\ln p^{prior}_{ij} + \ln L_{ij}] - \ln Z \Big)
+$$
+
+where the normalization constant \( Z \) is computed as:
+
+$$
 \ln Z =
 \ln \Big( \sum_{i,j} \exp [ \ln p^{prior}_{ij} + \ln L_{ij} ] \Big)
 $$
 
+---
+
 ### 5. Posterior statistics
+
+Posterior mean estimates are obtained from the normalized posterior as:
 
 $$
 \hat{m}_v = \sum_{i,j} p_{ij}\, m_{v,i}, \qquad
 \hat{c}_v = \sum_{i,j} p_{ij}\, c_{v,j}
 $$
 
-Marginal posteriors (summing over rows/columns) provide 95% credible intervals via discrete quantiles.
+Marginal posteriors (summing over rows/columns) provide 95 % credible intervals through discrete quantiles.
 
 ---
 
