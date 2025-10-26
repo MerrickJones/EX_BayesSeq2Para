@@ -96,10 +96,10 @@ $$
 
 $$
 p_{ij} =
-\exp \Big( [\log p^{\text{prior}}_{ij} + \log \mathcal{L}_{ij}] - \log Z \Big),
+\exp \Big( [\ln p^{prior}_{ij} + \ln L_{ij}] - \ln Z \Big),
 \qquad
-\log Z =
-\operatorname{logsumexp} \big( \log p^{\text{prior}} + \log \mathcal{L} \big)
+\ln Z =
+\ln \Big( \sum_{i,j} \exp [ \ln p^{prior}_{ij} + \ln L_{ij} ] \Big)
 $$
 
 ### 5. Posterior statistics
