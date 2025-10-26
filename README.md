@@ -1,4 +1,4 @@
-# Bayesian Updating for 1‑D Consolidation (Grid Posterior, Lognormal Priors)
+# Sequential Bayesian Updating for 1‑D Consolidation (Grid Posterior, Lognormal Priors)
 
 This repository provides a **comprehensive and transparent example** of Bayesian updating for the one‑dimensional consolidation problem in geotechnical engineering.  
 It demonstrates how to sequentially update soil parameters using settlement observations, showing **how information from monitoring data progressively refines model uncertainty**.
