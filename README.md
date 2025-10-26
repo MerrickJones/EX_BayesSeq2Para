@@ -72,37 +72,40 @@ Since both priors are lognormal, positivity is enforced automatically.
 
 Instead of Monte Carlo sampling, the posterior is computed on a **161 × 161 log‑spaced grid** in \((m_v,c_v)\):  
 
-1. **Grid definition**  
-   
-   $$
-   m_v \in [3\times10^{-4},\,3\times10^{-3}]\,\mathrm{(1/kPa)},
-   \quad
-   c_v \in [0.01,\,0.10]\,\mathrm{(m^2/day)}
-   $$
+### 1. Grid definition
 
-2. **Prior evaluation**  
-   Evaluate independent lognormal PDFs: \(p(m_v)\,p(c_v)\).
+$$
+m_v \in [3\times10^{-4},\,3\times10^{-3}]\,\mathrm{(1/kPa)}, \quad
+c_v \in [0.01,\,0.10]\,\mathrm{(m^2/day)}
+$$
 
-3. **Likelihood evaluation**  
-   For each grid point, compute \(s(t_i; m_v, c_v)\) and the Gaussian likelihood term \(\phi((y_i - s)/\sigma_e)\).
+### 2. Prior evaluation
 
-4. **Posterior normalization (log‑sum‑exp)**  
-   
-   $$
-   p_{ij} = \exp\!\left(\big[\log p^{\text{prior}}_{ij} + \log \mathcal{L}_{ij}\big] - \log Z\right),
-   \qquad
-   \log Z = \operatorname{logsumexp}\!\big(\log p^{\text{prior}} + \log \mathcal{L}\big)
-   $$
+Evaluate independent lognormal PDFs: \( p(m_v)\,p(c_v) \).
 
-5. **Posterior statistics**  
-   
-   $$
-   \hat{m}_v = \sum_{i,j} p_{ij}\, m_{v,i},
-   \qquad
-   \hat{c}_v = \sum_{i,j} p_{ij}\, c_{v,j}
-   $$
-   
-   Marginal posteriors (summing over rows/columns) provide 95% credible intervals via discrete quantiles.
+### 3. Likelihood evaluation
+
+For each grid point, compute the forward model \( s(t_i; m_v, c_v) \)  
+and the Gaussian likelihood term \( \phi((y_i - s)/\sigma_e) \).
+
+### 4. Posterior normalization (log-sum-exp)
+
+$$
+p_{ij} =
+\exp \Big( [\log p^{\text{prior}}_{ij} + \log \mathcal{L}_{ij}] - \log Z \Big),
+\qquad
+\log Z =
+\operatorname{logsumexp} \big( \log p^{\text{prior}} + \log \mathcal{L} \big)
+$$
+
+### 5. Posterior statistics
+
+$$
+\hat{m}_v = \sum_{i,j} p_{ij}\, m_{v,i}, \qquad
+\hat{c}_v = \sum_{i,j} p_{ij}\, c_{v,j}
+$$
+
+Marginal posteriors (summing over rows/columns) provide 95% credible intervals via discrete quantiles.
 
 ---
 
