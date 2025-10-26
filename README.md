@@ -97,7 +97,12 @@ $$
 
 ### 3. Likelihood evaluation
 
-For each grid point, compute the forward model \( s(t_i; m_v, c_v) \)  
+For each grid point, compute the forward model
+
+$$
+\( s(t_i; m_v, c_v) \)  
+$$
+
 and evaluate the Gaussian likelihood term:
 
 $$
