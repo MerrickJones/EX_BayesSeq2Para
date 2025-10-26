@@ -30,7 +30,7 @@ The settlement of a clay layer of thickness \(H = 5\,\mathrm{m}\) under an effec
 $$
 \begin{aligned}
 s(t; m_v, c_v) &= 110{,}000\,m_v\,U(T_v) \\
-U(T_v) &= 1 - \frac{8}{\pi^2}\exp\!\left(-\frac{\pi^2}{4}\,T_v\right) \\
+U(T_v) &= 1 - \frac{8}{\pi^2}\exp\\left(-\frac{\pi^2}{4}\,T_v\right) \\
 T_v &= \frac{c_v\,t}{(H/2)^2}
 \end{aligned}
 $$
