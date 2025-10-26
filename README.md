@@ -289,7 +289,7 @@ outputs_bayes_consolidation/Consolidation_Bayes_Summary.pdf
 
 Jones, M. (2025).  
 *Bayesian Updating for One-Dimensional Consolidation: Sequential parameter estimation using a grid-based posterior.*  
-University of Newcastle / BECA Consulting.
+University of Newcastle
 
 ---
 
