@@ -1,680 +1,510 @@
 # bayes_consolidation_sequential_viz.py
-# ===============================================================
-# 
-# This script performs sequential Bayesian updating for 1D consolidation settlement
-# analysis, estimating parameters m_v (coefficient of volume compressibility) and
-# c_v (coefficient of consolidation) based on observed settlements over time.
-#
-# Key Features:
-# - Uses a 161x161 grid-based approximation for the posterior distribution.
-# - Priors are independent lognormal distributions for m_v and c_v.
-# - Likelihood assumes Gaussian errors on settlements.
-# - Forward model is based on Terzaghi's 1D consolidation theory (approximate solution).
-# - Generates visualizations including:
-#   - Prior predictive curve.
-#   - Sequential posterior predictive plots with 95% credible bands.
-#   - Marginal prior vs. posterior densities for m_v and c_v.
-#   - Joint posterior heatmap.
-#   - Bayesian update equations (generic and per-observation).
-#   - Detailed worked examples for each observation step.
-#   - 3D posterior views for k=1 and k=4.
-#   - Parameter summary table.
-#   - High-level executive summary of the analysis.
-# - Outputs are saved as PNG figures and CSV tables in SAVE_DIR.
-#
-# User-Friendly Design:
-# - Configurable settings are at the top for easy modification.
-# - Clear comments and docstrings explain each part.
-# - Progress updates are printed during execution.
-# - Organized into logical sections: setup, helpers, models, and visualizations.
-# - Uses Matplotlib's mathtext (no LaTeX) for equations.
-#
-# Requirements: numpy, pandas, matplotlib
-# Run: python bayes_consolidation_sequential_viz.py
-# Outputs are displayed (plt.show()) and saved to 'outputs_bayes_consolidation/'.
-#
-# ===============================================================
-from __future__ import annotations
+# ---------------------------------------------------------------
+# Sequential Bayesian updating for 1D consolidation (m_v, c_v).
+# Pop-ups are standard size; saved PNGs are high-resolution (400 dpi).
+# Heatmaps use pcolormesh on the true (log-spaced) grid so contours align.
+# ---------------------------------------------------------------
 
+from __future__ import annotations
 import os
 import math
+from datetime import datetime
 import numpy as np
 import pandas as pd
+
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
-from mpl_toolkits.mplot3d import Axes3D  # For 3D plotting
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
-# Configure Matplotlib for consistent, LaTeX-free rendering
-mpl.rcParams["text.usetex"] = False          # Disable LaTeX
-mpl.rcParams["mathtext.fontset"] = "cm"      # Computer Modern math fonts
-mpl.rcParams["font.family"] = "serif"        # Serif text for readability
+# ---------- Matplotlib defaults ----------
+mpl.rcParams["text.usetex"] = False
+mpl.rcParams["mathtext.fontset"] = "cm"
+mpl.rcParams["font.family"] = "serif"
+mpl.rcParams["figure.dpi"] = 110          # comfortable on-screen size
+mpl.rcParams["savefig.dpi"] = 400         # high-resolution saves
+mpl.rcParams["savefig.facecolor"] = "white"
+mpl.rcParams["figure.facecolor"] = "white"
+mpl.rcParams["font.size"] = 11
 
-# Current date and time: 06:46 PM AEDT, Sunday, October 26, 2025
-CURRENT_TIME = "06:46 PM AEDT, Sunday, October 26, 2025"
+# ---------- Config ----------
+SAVE_DIR = "outputs_bayes_consolidation"
+N_GRID = 161
+RNG = np.random.default_rng(321)
 
+# ---------- Utilities ----------
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
 
-# ======================================================
-# CONFIGURATION: Customize these settings
-# ======================================================
-SAVE_DIR = "outputs_bayes_consolidation"     # Folder for saving results
-GRID_SIZE = 161                              # Grid resolution (larger = more accurate, slower)
-SAMPLE_COUNT = 4000                          # Samples for predictive bands
-RNG_SEED = 321                               # Random seed for reproducibility
-
-# Physical parameters
-LAYER_THICKNESS = 5.0                        # Layer thickness (m)
-LOAD_INCREMENT = 22.0                        # Δσ' (kPa)
-MEASUREMENT_NOISE = 3.0                      # Standard deviation of noise (mm)
-
-# Observation data
-OBSERVATION_TIMES = np.array([10.0, 20.0, 40.0, 80.0])  # Days
-OBSERVED_SETTLEMENTS = np.array([49.5, 61.1, 86.4, 116.7])  # mm
-
-# Prior parameters (lognormal distributions)
-M_V_MEDIAN = 1.0e-3                          # Median for m_v (1/kPa)
-C_V_MEDIAN = 0.040                           # Median for c_v (m²/day)
-LOG_SD_M = 0.6                               # Log-standard deviation for m_v
-LOG_SD_C = 0.6                               # Log-standard deviation for c_v
-
-# Fine time grid for plots
-PREDICTION_TIMES = np.linspace(1.0, 120.0, 180)
-
-
-# ======================================================
-# HELPER FUNCTIONS
-# ======================================================
-
-def ensure_directory(directory: str) -> None:
-    """Create a directory if it doesn’t exist."""
-    os.makedirs(directory, exist_ok=True)
-
-
-def logsumexp(log_values: np.ndarray) -> float:
-    """Compute log(sum(exp(log_values))) to prevent overflow."""
-    max_log = np.max(log_values)
-    return max_log + np.log(np.sum(np.exp(log_values - max_log)))
-
+def logsumexp(v: np.ndarray) -> float:
+    m = np.max(v)
+    return float(m + np.log(np.sum(np.exp(v - m))))
 
 def lognormal_pdf(x: float, mu_log: float, sigma_log: float) -> float:
-    """Calculate the lognormal probability density function."""
+    """Lognormal PDF with log-mean mu_log and log-std sigma_log."""
     if x <= 0:
         return 0.0
-    return (1.0 / (x * sigma_log * math.sqrt(2.0 * math.pi))) * \
-           math.exp(-0.5 * ((math.log(x) - mu_log) / sigma_log) ** 2)
+    return (1.0 / (x * sigma_log * math.sqrt(2.0 * math.pi))) * math.exp(
+        -((math.log(x) - mu_log) ** 2) / (2.0 * sigma_log ** 2)
+    )
 
-
-def discrete_quantile(grid: np.ndarray, pmf: np.ndarray, quantile: float) -> float:
-    """Find a discrete quantile from a grid and its PMF."""
+def discrete_quantile(grid: np.ndarray, pmf: np.ndarray, q: float) -> float:
     cdf = np.cumsum(pmf)
-    idx = np.searchsorted(cdf, quantile, side="left")
-    idx = min(max(idx, 0), len(grid) - 1)
-    return grid[idx]
-
+    idx = np.searchsorted(cdf, q, side="left")
+    idx = max(0, min(idx, len(grid) - 1))
+    return float(grid[idx])
 
 def pmf_to_density(grid: np.ndarray, pmf: np.ndarray) -> np.ndarray:
-    """Convert a PMF to an approximate continuous density."""
+    """Convert discrete pmf over a nonuniform grid to a piecewise-constant density."""
     dx = np.gradient(grid)
-    density = pmf / dx
-    area = np.trapz(density, grid)
+    dens = pmf / dx
+    area = np.trapezoid(dens, grid)
     if area > 0:
-        density /= area
-    return density
+        dens = dens / area
+    return dens
 
-
-def show_and_save(file_path: str) -> None:
-    """Save and display a figure with tight layout."""
+def show_and_save(path: str) -> None:
     plt.tight_layout()
-    plt.savefig(file_path, dpi=160)
-    print(f"Saved figure: {file_path}")
+    plt.savefig(path, dpi=400, bbox_inches="tight")
     plt.show()
 
+def fmt_small(x: float) -> str:
+    return f"{x:.3e}"
 
-def format_small(value: float) -> str:
-    """Format small numbers in scientific notation."""
-    return f"{value:.3e}"
+def fmt_std(x: float) -> str:
+    return f"{x:.3f}"
 
+# ---------- Problem setup ----------
+H = 5.0                 # m
+Hd = H / 2.0            # 2.5 m
+delta_sigma = 22.0      # kPa
+sigma_e = 3.0           # mm
 
-def format_standard(value: float) -> str:
-    """Format standard numbers to 3 decimal places."""
-    return f"{value:.3f}"
+t_all = np.array([10.0, 20.0, 40.0, 80.0])
+y_all = np.array([49.5, 61.1, 86.4, 116.7])  # mm
 
+# Priors (lognormal via medians + log-std)
+m_v_median = 1.0e-3
+c_v_median = 0.040
+sigma_log_m = 0.6
+sigma_log_c = 0.6
+mu_log_m = math.log(m_v_median)
+mu_log_c = math.log(c_v_median)
 
-# ======================================================
-# PROBLEM SETUP
-# ======================================================
-print("Setting up the analysis environment...")
+# Parameter grids (N × N, log-spaced) and mesh for pcolormesh
+N = N_GRID
+m_v_grid = np.exp(np.linspace(np.log(3e-4), np.log(3e-3), N))   # rows (i)
+c_v_grid = np.exp(np.linspace(np.log(0.01), np.log(0.10), N))   # cols (j)
+M_GRID, C_GRID = np.meshgrid(m_v_grid, c_v_grid, indexing="ij") # shape (N,N)
 
-# Drainage path (double drainage)
-DRAINAGE_PATH = LAYER_THICKNESS / 2.0  # 2.5 m
+# ---------- Forward model ----------
+def U_first_term(Tv):
+    return 1.0 - (8.0 / (math.pi ** 2)) * np.exp(-(math.pi ** 2) * np.asarray(Tv) / 4.0)
 
-# Prior means (log-scale)
-MU_LOG_M = math.log(M_V_MEDIAN)
-MU_LOG_C = math.log(C_V_MEDIAN)
+def settlement_mm(t: np.ndarray, m_v: float, c_v: float) -> np.ndarray:
+    Tv = c_v * t / (Hd ** 2)     # Hd^2 = 6.25
+    S_inf_mm = m_v * 110000.0    # 22 kPa × 5 m × 1000 mm/m
+    return S_inf_mm * U_first_term(Tv)
 
-# Parameter grids
-M_V_GRID = np.exp(np.linspace(np.log(3e-4), np.log(3e-3), GRID_SIZE))
-C_V_GRID = np.exp(np.linspace(np.log(0.01), np.log(0.10), GRID_SIZE))
-
-print(f"Grid ranges: m_v [{M_V_GRID.min():.3e}, {M_V_GRID.max():.3e}] 1/kPa")
-print(f"              c_v [{C_V_GRID.min():.3f}, {C_V_GRID.max():.3f}] m²/day")
-print(f"Grid size: {GRID_SIZE} x {GRID_SIZE} = {GRID_SIZE**2} points")
-
-# Random number generator
-RNG = np.random.default_rng(RNG_SEED)
-
-
-# ======================================================
-# FORWARD MODEL
-# ======================================================
-
-def u_first_term(time_factor: np.ndarray | float) -> np.ndarray | float:
-    """Approximate U(T_v) = 1 - (8/π²) exp(-π² T_v / 4)."""
-    return 1.0 - (8.0 / (math.pi ** 2)) * np.exp(-(math.pi ** 2) * np.asarray(time_factor) / 4.0)
-
-
-def settlement_mm(times: np.ndarray, m_v: float, c_v: float) -> np.ndarray:
-    """Predict settlement (mm) using S(t) = m_v * Δσ' * H * 1000 * U(c_v * t / (H/2)²)."""
-    time_factor = c_v * times / (DRAINAGE_PATH ** 2)
-    ultimate_settlement = m_v * LOAD_INCREMENT * LAYER_THICKNESS * 1000.0
-    return ultimate_settlement * u_first_term(time_factor)
-
-
-# ======================================================
-# BAYESIAN COMPONENTS
-# ======================================================
-
+# ---------- Bayesian pieces ----------
 def log_prior(m_v: float, c_v: float) -> float:
-    """Log of the joint prior density (independent lognormals)."""
-    pm = lognormal_pdf(m_v, MU_LOG_M, LOG_SD_M)
-    pc = lognormal_pdf(c_v, MU_LOG_C, LOG_SD_C)
-    if pm == 0.0 or pc == 0.0:
-        return -np.inf
+    pm = lognormal_pdf(m_v, mu_log_m, sigma_log_m)
+    pc = lognormal_pdf(c_v, mu_log_c, sigma_log_c)
+    if pm <= 0 or pc <= 0:
+        return -1e300
     return math.log(pm) + math.log(pc)
 
-
 def log_likelihood_subset(m_v: float, c_v: float, t_sub: np.ndarray, y_sub: np.ndarray) -> float:
-    """Log-likelihood with Gaussian errors."""
+    """Gaussian log-likelihood for subset with σ = sigma_e."""
     pred = settlement_mm(t_sub, m_v, c_v)
-    residuals = y_sub - pred
-    n_obs = len(y_sub)
-    return -0.5 * np.sum((residuals / MEASUREMENT_NOISE) ** 2) - \
-           n_obs * math.log(math.sqrt(2.0 * math.pi) * MEASUREMENT_NOISE)
-
+    resid = y_sub - pred
+    return -0.5 * np.sum((resid / sigma_e) ** 2) - len(y_sub) * math.log(math.sqrt(2.0 * math.pi) * sigma_e)
 
 def posterior_on_grid(t_sub: np.ndarray, y_sub: np.ndarray) -> np.ndarray:
-    """Compute normalized posterior PMF on the grid."""
-    print(f"  Calculating posterior for {len(t_sub)} observation{'s' if len(t_sub) > 1 else ''}...")
-    logpost = np.empty((len(M_V_GRID), len(C_V_GRID)))
-    for i, mv in enumerate(M_V_GRID):
-        for j, cv in enumerate(C_V_GRID):
-            lp = log_prior(mv, cv)
-            if np.isfinite(lp):
-                lp += log_likelihood_subset(mv, cv, t_sub, y_sub)
-            logpost[i, j] = lp
-    log_z = logsumexp(logpost.ravel())
-    posterior_pmf = np.exp(logpost - log_z)
-    print(f"  Normalization complete (log Z = {log_z:.4f})")
-    return posterior_pmf
+    logp = np.empty((N, N))
+    for i, mv in enumerate(m_v_grid):
+        for j, cv in enumerate(c_v_grid):
+            lp = log_prior(mv, cv) + log_likelihood_subset(mv, cv, t_sub, y_sub)
+            logp[i, j] = lp if np.isfinite(lp) else -1e300
+    Zlog = logsumexp(logp.ravel())
+    return np.exp(logp - Zlog)
 
+# ---------- Executive Summary ----------
+def draw_executive_summary(mv_mean: float, mv_lo: float, mv_hi: float,
+                           cv_mean: float, cv_lo: float, cv_hi: float):
+    """Concise first-page summary for reviewers (first popup)."""
+    fig = plt.figure(figsize=(9.6, 6.0))
+    ax = plt.gca(); ax.axis("off")
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = [
+        "Executive Summary — Bayesian Consolidation Analysis",
+        "",
+        "• Objective: Estimate mᵥ (1/kPa) and cᵥ (m²/day) for a 5 m clay layer under Δσ' = 22 kPa using "
+        "settlement at t = [10, 20, 40, 80] days.",
+        "• Method: Bayesian updating on a 161×161 (mᵥ, cᵥ) grid with lognormal priors "
+        f"(medians mᵥ={fmt_small(m_v_median)}, cᵥ={fmt_std(c_v_median)}; log-σ=0.6), "
+        "Gaussian measurement noise (σ=3 mm), and Terzaghi 1D consolidation (double drainage).",
+        "• Outputs: Prior/predictive plots, per-step worked examples, joint posterior heatmaps (pcolormesh + contours), "
+        "3-D normalized posteriors (k=1, k=4), marginal posteriors with 95% CrI, and a parameter summary table.",
+        "",
+        "Final (k=4) Posterior:",
+        f"  – mᵥ mean = {fmt_small(mv_mean)}  (95% CrI: {fmt_small(mv_lo)} – {fmt_small(mv_hi)})",
+        f"  – cᵥ mean = {fmt_std(cv_mean)}  (95% CrI: {fmt_std(cv_lo)} – {fmt_std(cv_hi)})",
+        "",
+        f"Run completed: {now_str} — Figures saved under “{SAVE_DIR}/”."
+    ]
+    ax.text(0.03, 0.98, "\n".join(lines), ha="left", va="top", fontsize=11, wrap=True)
+    show_and_save(os.path.join(SAVE_DIR, "executive_summary.png"))
 
-def sample_from_discrete_2d(posterior: np.ndarray, num_samples: int) -> tuple[np.ndarray, np.ndarray]:
-    """Sample parameters from the discrete posterior PMF."""
-    p_flat = posterior.ravel()
-    p_flat /= p_flat.sum()
-    indices = RNG.choice(len(p_flat), size=num_samples, p=p_flat)
-    i_samples, j_samples = np.unravel_index(indices, posterior.shape)
-    return M_V_GRID[i_samples], C_V_GRID[j_samples]
+# ---------- Numbers (equation) page per k ----------
+def draw_numbered_equation(k: int, mv_mean: float, cv_mean: float,
+                           pred_all_mm: np.ndarray, out_path: str):
+    fig = plt.figure(figsize=(9.0, 6.0))
+    ax = plt.gca(); ax.axis("off")
+    ax.set_title(f"Bayesian Updating Equation ({k} observation(s))", fontsize=14, pad=10)
 
+    eq_main = (r"$p(\theta\mid y_{1:{%d}})\ \propto\ "
+               r"\left[\prod_{i=1}^{%d}\ \phi\!\left(\frac{y_i - s(t_i;\theta)}{\sigma_e}\right)\right]\ p(\theta)$" % (k, k))
+    ax.text(0.5, 0.86, eq_main, fontsize=20, ha="center", va="center",
+            bbox=dict(boxstyle="round,pad=0.35", ec="black", fc="none", lw=1.4))
 
-def predictive_bands_from_samples(t_vec: np.ndarray, m_samples: np.ndarray, c_samples: np.ndarray,
-                                 q_low: float = 0.025, q_high: float = 0.975) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Compute predictive median and 95% credible bands."""
-    predictions = np.array([settlement_mm(t_vec, m, c) for m, c in zip(m_samples, c_samples)])
-    median = np.median(predictions, axis=0)
-    lower = np.quantile(predictions, q_low, axis=0)
-    upper = np.quantile(predictions, q_high, axis=0)
-    return median, lower, upper
-
-
-# ======================================================
-# VISUALIZATION FUNCTIONS
-# ======================================================
-
-def draw_equation(k: int, file_name: str, mv_mean: float, cv_mean: float, pred_all: np.ndarray) -> None:
-    """Draw a figure with the Bayesian update equation for k observations."""
-    plt.figure(figsize=(12.5, 7.2))
-    ax = plt.gca()
-    ax.axis("off")
-    plt.title(f"Bayesian Update Equation ({k} Observation{'s' if k > 1 else ''})", fontsize=14, pad=12)
-
-    main_eq = (r"$p(\theta \mid y_{1:%d}) \propto "
-               r"\left[ \prod_{i=1}^{%d} \phi \left( \frac{y_i - s(t_i; \theta)}{\sigma_e} \right) \right] p(\theta)$" % (k, k))
-    ax.text(0.5, 0.86, main_eq, fontsize=22, ha="center", va="center",
-            bbox=dict(boxstyle="round,pad=0.35", ec="black", fc="none", lw=1.6))
-
-    y_vals = OBSERVED_SETTLEMENTS[:k]
-    t_vals = OBSERVATION_TIMES[:k]
-    y_pos = 0.70
+    y_vals = [49.5, 61.1, 86.4, 116.7][:k]
+    t_vals = [10, 20, 40, 80][:k]
+    y_base = 0.70
     for i in range(k):
-        phi_term = (r"$\phi \left( \frac{%0.1f \, \mathrm{mm} - s(%d; \theta)}{3.0 \, \mathrm{mm}} \right)$" % (y_vals[i], int(t_vals[i])))
-        ax.text(0.5, y_pos, phi_term, fontsize=20, ha="center", va="center")
-        y_pos -= 0.08
+        ax.text(0.5, y_base - 0.07 * i,
+                r"$\phi\!\left(\dfrac{%0.1f\ \mathrm{mm} - s(%d;\,\theta)}{3.0\ \mathrm{mm}}\right)$" % (y_vals[i], t_vals[i]),
+                fontsize=18, ha="center", va="center")
 
-    s_eq = (r"$s(t; \theta) = m_v \, \Delta \sigma' \, H \, U \left( \frac{c_v \, t}{(H/2)^2} \right), "
-            r"U(T_v) \approx 1 - \frac{8}{\pi^2} \exp \left( -\frac{\pi^2}{4} T_v \right)$")
-    ax.text(0.5, 0.38, s_eq, fontsize=18, ha="center", va="center")
+    ax.text(0.5, 0.35,
+            (r"$s(t;\theta)=m_v\,\Delta\sigma'\,H\,U\!\left(\frac{c_v\,t}{(H/2)^2}\right),\quad"
+             r"U(T_v)\approx 1-\dfrac{8}{\pi^2}\exp\!\left(-\dfrac{\pi^2}{4}\,T_v\right)$"),
+            fontsize=16, ha="center", va="center")
+    ax.text(0.5, 0.27,
+            (r"$\Delta\sigma'=22\ \mathrm{kPa},\ H=5\ \mathrm{m},\ H/2=2.5\ \mathrm{m},\ "
+             r"\sigma_e=3.0\ \mathrm{mm}.$"),
+            fontsize=14, ha="center", va="center")
 
-    params_text = (r"$\Delta \sigma' = 22 \, \mathrm{kPa}, \, H = 5 \, \mathrm{m}, \, H/2 = 2.5 \, \mathrm{m}, \, "
-                   r"\sigma_e = 3.0 \, \mathrm{mm}$")
-    ax.text(0.5, 0.28, params_text, fontsize=16, ha="center", va="center")
+    ax.text(0.5, 0.18,
+            rf"$\hat m_v={fmt_small(mv_mean)}\ \mathrm{{1/kPa}},\quad "
+            rf"\hat c_v={fmt_std(cv_mean)}\ \mathrm{{m^2/day}}$",
+            fontsize=16, ha="center", va="center")
 
-    means_text = (rf"$\hat{{m_v}} = {format_small(mv_mean)} \, \mathrm{{1/kPa}}, \, "
-                  rf"\hat{{c_v}} = {format_standard(cv_mean)} \, \mathrm{{m^2/day}}$")
-    ax.text(0.5, 0.18, means_text, fontsize=18, ha="center", va="center")
+    t_labels = ", ".join([f"{int(ti)}" for ti in [10, 20, 40, 80]])
+    s_labels = ", ".join([f"{s:.1f}" for s in pred_all_mm])
+    ax.text(0.5, 0.08,
+            rf"Updated settlements (mm) at t = [{t_labels}]:  [{s_labels}]",
+            fontsize=12, ha="center", va="center")
 
-    t_labels = ", ".join([f"{int(t)}" for t in OBSERVATION_TIMES])
-    s_labels = ", ".join([f"{s:.1f}" for s in pred_all])
-    pred_text = rf"Updated $s(t)$ (mm) at $t = [{t_labels}]: [{s_labels}]$"
-    ax.text(0.5, 0.08, pred_text, fontsize=14, ha="center", va="center")
+    show_and_save(out_path)
 
-    show_and_save(os.path.join(SAVE_DIR, file_name))
-
-
-def worked_example_figure(k: int, posterior: np.ndarray, file_name: str) -> tuple[float, float, np.ndarray]:
-    """Create a 4-panel worked example with prior, likelihood, unnormalized, and normalized posteriors."""
-    t_sub, y_sub = OBSERVATION_TIMES[:k], OBSERVED_SETTLEMENTS[:k]
+# ---------- Worked example (4-panel) per k ----------
+def worked_example_figure(k: int, post_grid: np.ndarray, out_path: str) -> tuple[float, float, np.ndarray]:
+    t_sub, y_sub = t_all[:k], y_all[:k]
 
     # Prior grid (scaled)
-    log_prior_grid = np.empty((GRID_SIZE, GRID_SIZE))
-    for i, mv in enumerate(M_V_GRID):
-        for j, cv in enumerate(C_V_GRID):
-            log_prior_grid[i, j] = log_prior(mv, cv)
-    prior_scaled = np.exp(log_prior_grid - np.max(log_prior_grid))
+    logprior = np.empty((N, N))
+    for i, mv in enumerate(m_v_grid):
+        for j, cv in enumerate(c_v_grid):
+            lp = log_prior(mv, cv)
+            logprior[i, j] = lp if np.isfinite(lp) else -1e300
+    prior_scaled = np.exp(logprior - np.max(logprior))
 
-    # Likelihood grid
-    log_lik_grid = np.empty((GRID_SIZE, GRID_SIZE))
-    for i, mv in enumerate(M_V_GRID):
-        for j, cv in enumerate(C_V_GRID):
-            log_lik_grid[i, j] = log_likelihood_subset(mv, cv, t_sub, y_sub)
-    lik_pos = np.exp(log_lik_grid)
+    # Likelihood grid (k obs)
+    loglik = np.empty((N, N))
+    for i, mv in enumerate(m_v_grid):
+        for j, cv in enumerate(c_v_grid):
+            loglik[i, j] = log_likelihood_subset(mv, cv, t_sub, y_sub)
+    lik_pos = np.exp(loglik)
 
-    # Unnormalized posterior
-    unnorm_post = prior_scaled * lik_pos
+    # Unnormalized posterior (display only, positive)
+    unnorm_pos = prior_scaled * lik_pos
 
-    # Normalized posterior (provided)
-    mv_mean = float(np.sum(posterior * M_V_GRID[:, None]))
-    cv_mean = float(np.sum(posterior * C_V_GRID[None, :]))
-    i_map, j_map = np.unravel_index(np.argmax(posterior), posterior.shape)
-    mv_map, cv_map = M_V_GRID[i_map], C_V_GRID[j_map]
-    pred_all = settlement_mm(OBSERVATION_TIMES, mv_mean, cv_mean)
+    # Posterior means & MAP
+    mv_mean_k = float(np.sum(post_grid * m_v_grid[:, None]))
+    cv_mean_k = float(np.sum(post_grid * c_v_grid[None, :]))
+    i_map, j_map = np.unravel_index(np.argmax(post_grid), post_grid.shape)
+    mv_map_k, cv_map_k = float(m_v_grid[i_map]), float(c_v_grid[j_map])
+    pred_all_k = settlement_mm(t_all, mv_mean_k, cv_mean_k)
 
-    # Figure setup
-    fig = plt.figure(figsize=(12.8, 8.4))
+    fig = plt.figure(figsize=(9.6, 6.2))
     gs = GridSpec(2, 3, figure=fig, width_ratios=[1, 1, 1.12])
 
-    # Prior
+    # Prior (scaled)
     ax1 = fig.add_subplot(gs[0, 0])
-    im1 = ax1.imshow(prior_scaled.T, origin="lower",
-                     extent=[M_V_GRID.min(), M_V_GRID.max(), C_V_GRID.min(), C_V_GRID.max()],
-                     aspect="auto")
-    ax1.set_title("Prior Density (Scaled)")
-    ax1.set_xlabel("m_v (1/kPa)")
-    ax1.set_ylabel("c_v (m²/day)")
-    fig.colorbar(im1, ax=ax1, shrink=0.8)
+    pcm1 = ax1.pcolormesh(M_GRID, C_GRID, prior_scaled, shading="auto", cmap="viridis")
+    ax1.set_title("Prior density (scaled)")
+    ax1.set_xlabel("m_v (1/kPa)"); ax1.set_ylabel("c_v (m^2/day)")
+    fig.colorbar(pcm1, ax=ax1, shrink=0.8)
 
     # Likelihood
     ax2 = fig.add_subplot(gs[0, 1])
-    im2 = ax2.imshow(lik_pos.T, origin="lower",
-                     extent=[M_V_GRID.min(), M_V_GRID.max(), C_V_GRID.min(), C_V_GRID.max()],
-                     aspect="auto")
+    pcm2 = ax2.pcolormesh(M_GRID, C_GRID, lik_pos, shading="auto", cmap="viridis")
     ax2.set_title(f"Likelihood (k={k})")
-    ax2.set_xlabel("m_v (1/kPa)")
-    ax2.set_ylabel("c_v (m²/day)")
-    fig.colorbar(im2, ax=ax2, shrink=0.8)
+    ax2.set_xlabel("m_v (1/kPa)"); ax2.set_ylabel("c_v (m^2/day)")
+    fig.colorbar(pcm2, ax=ax2, shrink=0.8)
 
-    # Unnormalized Posterior
+    # Unnormalized posterior
     ax3 = fig.add_subplot(gs[1, 0])
-    im3 = ax3.imshow(unnorm_post.T, origin="lower",
-                     extent=[M_V_GRID.min(), M_V_GRID.max(), C_V_GRID.min(), C_V_GRID.max()],
-                     aspect="auto")
-    ax3.set_title("Unnormalized Posterior ∝ Prior × Likelihood")
-    ax3.set_xlabel("m_v (1/kPa)")
-    ax3.set_ylabel("c_v (m²/day)")
-    fig.colorbar(im3, ax=ax3, shrink=0.8)
+    pcm3 = ax3.pcolormesh(M_GRID, C_GRID, unnorm_pos, shading="auto", cmap="viridis")
+    ax3.set_title("Unnormalized posterior = prior × likelihood")
+    ax3.set_xlabel("m_v (1/kPa)"); ax3.set_ylabel("c_v (m^2/day)")
+    fig.colorbar(pcm3, ax=ax3, shrink=0.8)
 
-    # Normalized Posterior
+    # Normalized posterior + markers
     ax4 = fig.add_subplot(gs[1, 1])
-    im4 = ax4.imshow(posterior.T, origin="lower",
-                     extent=[M_V_GRID.min(), M_V_GRID.max(), C_V_GRID.min(), C_V_GRID.max()],
-                     aspect="auto")
-    cs = ax4.contour(M_V_GRID, C_V_GRID, posterior.T, levels=6, linewidths=0.8, colors="k")
+    pcm4 = ax4.pcolormesh(M_GRID, C_GRID, post_grid, shading="auto", cmap="viridis")
+    cs = ax4.contour(m_v_grid, c_v_grid, post_grid.T, levels=6, linewidths=0.8, colors="k")
     ax4.clabel(cs, inline=True, fontsize=7)
-    ax4.scatter([mv_map], [cv_map], marker="^", s=70, label="MAP (Mode)")
-    ax4.scatter([mv_mean], [cv_mean], marker="x", s=70, label="Mean (×)")
-    ax4.set_title(f"Normalized Posterior (k={k})")
-    ax4.set_xlabel("m_v (1/kPa)")
-    ax4.set_ylabel("c_v (m²/day)")
+    ax4.scatter([mv_map_k], [cv_map_k], marker="^", s=70, label="MAP (mode)")
+    ax4.scatter([mv_mean_k], [cv_mean_k], marker="x", s=70, label="Mean (×)")
+    ax4.set_title(f"Normalized posterior (k={k})")
+    ax4.set_xlabel("m_v (1/kPa)"); ax4.set_ylabel("c_v (m^2/day)")
     ax4.legend(fontsize=8, loc="upper left")
-    fig.colorbar(im4, ax=ax4, shrink=0.8)
+    fig.colorbar(pcm4, ax=ax4, shrink=0.8)
 
-    # Text Panel
-    ax5 = fig.add_subplot(gs[:, 2])
-    ax5.axis("off")
+    # Text panel
+    ax5 = fig.add_subplot(gs[:, 2]); ax5.axis("off")
     lines = [
-        rf"$\hat m_v \approx {format_small(mv_mean)} \, \mathrm{{1/kPa}},\quad "
-        rf"\hat c_v \approx {format_standard(cv_mean)} \, \mathrm{{m^2/day}}$",
-        r"Updated $s(t)$ (mm) at $t = [10, 20, 40, 80]$:",
-        rf"$[{pred_all[0]:.1f}, {pred_all[1]:.1f}, {pred_all[2]:.1f}, {pred_all[3]:.1f}]$"
+        fr"$\hat m_v\approx {fmt_small(mv_mean_k)}\ \mathrm{{1/kPa}},\quad "
+        fr"\hat c_v\approx {fmt_std(cv_mean_k)}\ \mathrm{{m^2/day}}$",
+        r"$\text{Updated } s(t)\ \text{(mm) at } t=\{10,20,40,80\}:$",
+        fr"$[{pred_all_k[0]:.1f},\ {pred_all_k[1]:.1f},\ {pred_all_k[2]:.1f},\ {pred_all_k[3]:.1f}]$"
     ]
     ax5.text(0.02, 0.98, "\n".join(lines), va="top", fontsize=11)
 
-    fig.suptitle(f"Worked Example: Bayesian Update with k={k}", fontsize=14, y=0.98)
-    show_and_save(os.path.join(SAVE_DIR, file_name))
-    return mv_mean, cv_mean, pred_all
+    fig.suptitle(f"Worked Example: Bayesian Updating with k={k}", fontsize=14, y=0.98)
+    show_and_save(out_path)
+    return mv_mean_k, cv_mean_k, pred_all_k
 
+# ---------------- Run sequence ----------------
+ensure_dir(SAVE_DIR)
 
-def draw_posterior_3d(k: int, t_sub: np.ndarray, y_sub: np.ndarray, file_name: str) -> None:
-    """Draw a 3D posterior surface with 2D contour for given k observations."""
-    posterior = posterior_on_grid(t_sub, y_sub)
-    mv_mean = float(np.sum(posterior * M_V_GRID[:, None]))
-    cv_mean = float(np.sum(posterior * C_V_GRID[None, :]))
-    i_map, j_map = np.unravel_index(np.argmax(posterior), posterior.shape)
-    mv_map, cv_map = M_V_GRID[i_map], C_V_GRID[j_map]
+# Compute full posterior first (k=4) for executive summary
+post_all = posterior_on_grid(t_all, y_all)
+marg_m_all = np.sum(post_all, axis=1)
+marg_c_all = np.sum(post_all, axis=0)
+mv_mean_all = float(np.sum(post_all * m_v_grid[:, None]))
+cv_mean_all = float(np.sum(post_all * c_v_grid[None, :]))
+mv_lo_all = discrete_quantile(m_v_grid, marg_m_all, 0.025)
+mv_hi_all = discrete_quantile(m_v_grid, marg_m_all, 0.975)
+cv_lo_all = discrete_quantile(c_v_grid, marg_c_all, 0.025)
+cv_hi_all = discrete_quantile(c_v_grid, marg_c_all, 0.975)
 
-    M, C = np.meshgrid(M_V_GRID, C_V_GRID, indexing="ij")
-    Z = posterior
+# 0) Executive summary (first popup)
+draw_executive_summary(mv_mean_all, mv_lo_all, mv_hi_all, cv_mean_all, cv_lo_all, cv_hi_all)
 
-    fig = plt.figure(figsize=(12.5, 7.5))
-    ax3d = fig.add_subplot(121, projection="3d")
-    surf = ax3d.plot_surface(M, C, Z, rstride=3, cstride=3, linewidth=0.0, antialiased=True, alpha=0.95, cmap="viridis")
-    ax3d.contour(M, C, Z, zdir='z', offset=0, cmap="viridis", levels=8)
-    ax3d.set_title(f"k={k} Normalized Posterior — 3D Surface")
-    ax3d.set_xlabel("m_v (1/kPa)")
-    ax3d.set_ylabel("c_v (m²/day)")
-    ax3d.set_zlabel(f"p(m_v, c_v | y_{1 if k==1 else '1:'+str(k)})")
-
-    i_mean = np.argmin(np.abs(M_V_GRID - mv_mean))
-    j_mean = np.argmin(np.abs(C_V_GRID - cv_mean))
-    ax3d.plot([mv_mean, mv_mean], [cv_mean, cv_mean], [0, Z[i_mean, j_mean]], "k-", linewidth=2)
-    ax3d.scatter(mv_mean, cv_mean, Z[i_mean, j_mean], marker="x", s=60, label="Mean (×)")
-    ax3d.scatter(mv_map, cv_map, Z[i_map, j_map], marker="^", s=60, label="MAP (▲)")
-
-    ax2d = fig.add_subplot(122)
-    im = ax2d.imshow(Z.T, origin="lower",
-                     extent=[M_V_GRID.min(), M_V_GRID.max(), C_V_GRID.min(), C_V_GRID.max()],
-                     aspect="auto", cmap="viridis")
-    cs2 = ax2d.contour(M_V_GRID, C_V_GRID, Z.T, levels=8, linewidths=0.8, colors="k")
-    ax2d.clabel(cs2, inline=True, fontsize=7)
-    ax2d.scatter([mv_map], [cv_map], marker="^", s=70, label="MAP")
-    ax2d.scatter([mv_mean], [cv_mean], marker="x", s=70, label="Mean")
-    ax2d.set_title(f"Top-down with Colormap + Contours (k={k})")
-    ax2d.set_xlabel("m_v (1/kPa)")
-    ax2d.set_ylabel("c_v (m²/day)")
-    fig.colorbar(im, ax=ax2d, shrink=0.75, pad=0.06)
-    ax2d.legend(fontsize=8, loc="upper left")
-    fig.suptitle(f"k={k} Normalized Posterior — 3D View + Explanation", fontsize=14)
-    show_and_save(os.path.join(SAVE_DIR, file_name))
-
-
-def draw_executive_summary() -> None:
-    """Create a high-level executive summary of the analysis as the final figure."""
-    plt.figure(figsize=(12, 8))
-    ax = plt.gca()
-    ax.axis("off")
-    title = "Executive Summary: Bayesian Consolidation Analysis"
-    plt.title(title, fontsize=16, pad=15, fontweight="bold")
-
-    summary_text = (
-        "Overview:\n"
-        "This analysis employs a Bayesian framework to estimate consolidation parameters "
-        "m_v (coefficient of volume compressibility) and c_v (coefficient of consolidation) "
-        "for a 5m soil layer under a 22 kPa load increment, using settlement data at "
-        "t = [10, 20, 40, 80] days. The process integrates prior knowledge with observed "
-        "settlements to refine parameter estimates sequentially.\n\n"
-
-        "Methodology:\n"
-        "1. **Prior Setup**: Independent lognormal priors were defined with medians "
-        "m_v = 1.0e-3 1/kPa and c_v = 0.040 m²/day, and log-standard deviations of 0.6.\n"
-        "2. **Forward Model**: Settlement predictions use Terzaghi’s 1D consolidation "
-        "theory (U(T_v) ≈ 1 - (8/π²)exp(-π²T_v/4)), adjusted for double drainage.\n"
-        "3. **Likelihood**: Gaussian likelihood with a 3 mm standard deviation models "
-        "observation errors.\n"
-        "4. **Posterior Computation**: A 161x161 grid approximates the posterior, updated "
-        "sequentially with 1, 2, 3, and 4 observations.\n"
-        "5. **Visualization**: Plots include predictive curves, marginal densities, "
-        "joint posteriors, 3D surfaces (k=1, k=4), and worked examples for each step.\n"
-        "6. **Summary**: A table tracks parameter means and 95% credible intervals.\n\n"
-
-        "Key Findings:\n"
-        "- The prior predictive curve provides a baseline settlement trend.\n"
-        "- Sequential updates sharpen parameter estimates as more data is incorporated.\n"
-        "- Full-data posterior (k=4) shows m_v ≈ 1.25e-03 1/kPa and c_v ≈ 0.045 m²/day, "
-        "with 95% credible intervals refining the uncertainty range.\n"
-        "- 3D visualizations highlight the posterior shape, with mean and MAP markers.\n\n"
-
-        "Conclusion:\n"
-        "This analysis successfully refines consolidation parameters using Bayesian methods, "
-        "offering robust predictions and uncertainty quantification. The sequential approach "
-        "demonstrates improved accuracy with additional observations, validated by worked "
-        "examples and summary statistics. Results are saved in 'outputs_bayes_consolidation/' "
-        f"as of {CURRENT_TIME}."
-    )
-
-    ax.text(0.05, 0.95, summary_text, fontsize=12, va="top", wrap=True)
-    show_and_save(os.path.join(SAVE_DIR, "executive_summary.png"))
-
-
-# ======================================================
-# MAIN EXECUTION
-# ======================================================
-print("=" * 60)
-print(f"Starting Sequential Bayesian Consolidation Analysis")
-print(f"Date and Time: {CURRENT_TIME}")
-print("=" * 60)
-
-ensure_directory(SAVE_DIR)
-print(f"Output directory: {os.path.abspath(SAVE_DIR)}")
-
-# Prior predictive curve
-print("\nGenerating prior predictive curve...")
-PRIOR_CURVE = settlement_mm(PREDICTION_TIMES, M_V_MEDIAN, C_V_MEDIAN)
-
-plt.figure(figsize=(8, 6))
-plt.plot(PREDICTION_TIMES, PRIOR_CURVE, label="Prior Prediction", color='blue', linestyle='--')
-plt.xlabel("Time (days)")
-plt.ylabel("Settlement (mm)")
-plt.title("Prior Predictive Settlement")
+# 1) Prior-only predictive
+plt.figure()
+plt.plot(t_all, settlement_mm(t_all, m_v_median, c_v_median), "C0-o", label="Prior predictive (median)")
+plt.scatter(t_all, y_all, color="k", s=30, zorder=3, label="Observed")
+plt.xlabel("Time t (days)"); plt.ylabel("Settlement (mm)")
+plt.title("Prior only")
 plt.legend()
-plt.grid(True, alpha=0.3)
 show_and_save(os.path.join(SAVE_DIR, "step0_prior_only.png"))
 
-# Sequential scenarios
-SCENARIOS = [
-    {"name": "step1_first_obs", "k": 1},
-    {"name": "step2_first_two", "k": 2},
-    {"name": "step3_first_three", "k": 3},
-    {"name": "step4_all_four", "k": 4},
-]
-
-# Parameter summary data
-PARAM_SUMMARY = []
-
-# Prior quantiles
-prior_mv_lo = math.exp(MU_LOG_M - 1.96 * LOG_SD_M)
-prior_mv_hi = math.exp(MU_LOG_M + 1.96 * LOG_SD_M)
-prior_cv_lo = math.exp(MU_LOG_C - 1.96 * LOG_SD_C)
-prior_cv_hi = math.exp(MU_LOG_C + 1.96 * LOG_SD_C)
-PARAM_SUMMARY.append({
+# Summary rows
+rows_summary = []
+rows_summary.append({
     "Stage": "Prior",
-    "m_v_mean": M_V_MEDIAN,
-    "m_v_95_lo": prior_mv_lo,
-    "m_v_95_hi": prior_mv_hi,
-    "c_v_mean": C_V_MEDIAN,
-    "c_v_95_lo": prior_cv_lo,
-    "c_v_95_hi": prior_cv_hi
+    "m_v (mean/median)": m_v_median,
+    "m_v 95% CrI lo": math.exp(mu_log_m - 1.96 * sigma_log_m),
+    "m_v 95% CrI hi": math.exp(mu_log_m + 1.96 * sigma_log_m),
+    "c_v (mean/median)": c_v_median,
+    "c_v 95% CrI lo": math.exp(mu_log_c - 1.96 * sigma_log_c),
+    "c_v 95% CrI hi": math.exp(mu_log_c + 1.96 * sigma_log_c),
 })
 
-TABLES = []
+def draw_predictive_page(k: int, post_grid: np.ndarray, out_path: str):
+    """Per-k predictive plot."""
+    t_sub, y_sub = t_all[:k], y_all[:k]
+    mv_mean_k = float(np.sum(post_grid * m_v_grid[:, None]))
+    cv_mean_k = float(np.sum(post_grid * c_v_grid[None, :]))
+    s_prior = settlement_mm(t_all, m_v_median, c_v_median)
+    s_post = settlement_mm(t_all, mv_mean_k, cv_mean_k)
 
-print("\nPerforming sequential Bayesian updates...")
-for scenario in SCENARIOS:
-    name = scenario["name"]
-    k = scenario["k"]
-    print(f"\n--- Updating with first {k} observation{'s' if k > 1 else ''} ---")
-
-    t_sub = OBSERVATION_TIMES[:k]
-    y_sub = OBSERVED_SETTLEMENTS[:k]
-
-    POSTERIOR = posterior_on_grid(t_sub, y_sub)
-    M_SAMPLES, C_SAMPLES = sample_from_discrete_2d(POSTERIOR, SAMPLE_COUNT)
-    POST_MED, POST_LO, POST_HI = predictive_bands_from_samples(PREDICTION_TIMES, M_SAMPLES, C_SAMPLES)
-
-    # Predictive plot
-    plt.figure(figsize=(8, 6))
-    plt.plot(PREDICTION_TIMES, PRIOR_CURVE, label="Prior Prediction", color='blue', linestyle='--')
-    plt.scatter(t_sub, y_sub, color='red', label=f"Observed (n={k})", zorder=5)
-    plt.fill_between(PREDICTION_TIMES, POST_LO, POST_HI, alpha=0.25, color='green', label="95% Credible Band")
-    plt.plot(PREDICTION_TIMES, POST_MED, label="Posterior Prediction", color='green')
-    plt.xlabel("Time (days)")
-    plt.ylabel("Settlement (mm)")
-    plt.title(f"Update with First {k} Observation{'s' if k > 1 else ''}")
+    plt.figure()
+    plt.plot(t_all, s_prior, "C0-o", label="Prior predictive (median)")
+    plt.plot(t_all, s_post, "C1-o", label=f"Posterior predictive (k={k}, mean)")
+    plt.scatter(t_sub, y_sub, color="k", s=30, zorder=3, label=f"Observed (k={k})")
+    plt.xlabel("Time t (days)"); plt.ylabel("Settlement (mm)")
+    plt.title(f"Sequential update using first {k} observation(s)")
     plt.legend()
-    plt.grid(True, alpha=0.3)
-    show_and_save(os.path.join(SAVE_DIR, f"{name}.png"))
+    show_and_save(out_path)
 
-    # Posterior statistics
-    MV_MEAN = float(np.sum(POSTERIOR * M_V_GRID[:, None]))
-    CV_MEAN = float(np.sum(POSTERIOR * C_V_GRID[None, :]))
-    MARG_M = np.sum(POSTERIOR, axis=1)
-    MARG_C = np.sum(POSTERIOR, axis=0)
-    MV_LO = discrete_quantile(M_V_GRID, MARG_M, 0.025)
-    MV_HI = discrete_quantile(M_V_GRID, MARG_M, 0.975)
-    CV_LO = discrete_quantile(C_V_GRID, MARG_C, 0.025)
-    CV_HI = discrete_quantile(C_V_GRID, MARG_C, 0.975)
+# k = 1..4 loop with per-step pages
+post_k_cache = {}
+for k in [1, 2, 3, 4]:
+    t_sub, y_sub = t_all[:k], y_all[:k]
+    post_k = posterior_on_grid(t_sub, y_sub)
+    post_k_cache[k] = post_k
 
-    PARAM_SUMMARY.append({
+    draw_predictive_page(k, post_k, os.path.join(SAVE_DIR, f"step{k}_first_obs.png"))
+
+    mv_mean_k = float(np.sum(post_k * m_v_grid[:, None]))
+    cv_mean_k = float(np.sum(post_k * c_v_grid[None, :]))
+    pred_all_k = settlement_mm(t_all, mv_mean_k, cv_mean_k)
+    draw_numbered_equation(k, mv_mean_k, cv_mean_k, pred_all_k,
+                           os.path.join(SAVE_DIR, f"equation_obs{k}.png"))
+
+    _mv_k, _cv_k, _ = worked_example_figure(k, post_k,
+                           os.path.join(SAVE_DIR, f"equation_obs{k}_worked_example.png"))
+
+    marg_m_k = np.sum(post_k, axis=1)
+    marg_c_k = np.sum(post_k, axis=0)
+    rows_summary.append({
         "Stage": f"Posterior ({k} obs)",
-        "m_v_mean": MV_MEAN,
-        "m_v_95_lo": MV_LO,
-        "m_v_95_hi": MV_HI,
-        "c_v_mean": CV_MEAN,
-        "c_v_95_lo": CV_LO,
-        "c_v_95_hi": CV_HI
+        "m_v (mean/median)": mv_mean_k,
+        "m_v 95% CrI lo": discrete_quantile(m_v_grid, marg_m_k, 0.025),
+        "m_v 95% CrI hi": discrete_quantile(m_v_grid, marg_m_k, 0.975),
+        "c_v (mean/median)": cv_mean_k,
+        "c_v 95% CrI lo": discrete_quantile(c_v_grid, marg_c_k, 0.025),
+        "c_v 95% CrI hi": discrete_quantile(c_v_grid, marg_c_k, 0.975),
     })
 
-    print(f"  Posterior mean: m_v = {format_small(MV_MEAN)} 1/kPa, c_v = {format_standard(CV_MEAN)} m²/day")
-    print(f"  95% Credible Interval: m_v [{format_small(MV_LO)}, {format_small(MV_HI)}], "
-          f"c_v [{format_standard(CV_LO)}, {format_standard(CV_HI)}]")
+# ===== Final sequence after equation_obs4_worked_example =====
 
-    # Prediction table
-    prior_preds = np.round(settlement_mm(t_sub, M_V_MEDIAN, C_V_MEDIAN), 1)
-    post_preds = np.round(settlement_mm(t_sub, MV_MEAN, CV_MEAN), 1)
-    df_step = pd.DataFrame({
-        "Scenario": name,
-        "Time (days)": t_sub,
-        "Observed (mm)": y_sub,
-        "Prior Prediction (mm)": prior_preds,
-        "Posterior Prediction (mm)": post_preds
-    })
-    TABLES.append(df_step)
-
-    # Equation and worked example
-    PRED_ALL = settlement_mm(OBSERVATION_TIMES, MV_MEAN, CV_MEAN)
-    draw_equation(k, f"equation_obs{k}.png", MV_MEAN, CV_MEAN, PRED_ALL)
-    worked_example_figure(k, POSTERIOR, f"equation_obs{k}_worked_example.png")
-
-# Save prediction table
-df_predictions = pd.concat(TABLES, ignore_index=True)
-csv_path = os.path.join(SAVE_DIR, "sequential_predictions.csv")
-df_predictions.to_csv(csv_path, index=False)
-print(f"\nSaved prediction table: {csv_path}")
-
-# Ordered final pop-ups
-print("\nDisplaying remaining figures in requested order...")
-
-# 1) Joint posterior (all data)
-POST_ALL = posterior_on_grid(OBSERVATION_TIMES, OBSERVED_SETTLEMENTS)
+# A) Posterior joint heatmap (all data) — pcolormesh + contours
 plt.figure()
-plt.imshow(POST_ALL.T, origin="lower", aspect="auto",
-           extent=[M_V_GRID.min(), M_V_GRID.max(), C_V_GRID.min(), C_V_GRID.max()])
-plt.colorbar(label="Posterior Probability (Discrete)")
-plt.xlabel("m_v (1/kPa)")
-plt.ylabel("c_v (m²/day)")
-plt.title("Posterior Joint (m_v, c_v | All Data)")
+pcm_joint = plt.pcolormesh(M_GRID, C_GRID, post_all, shading="auto", cmap="viridis")
+cs_joint = plt.contour(m_v_grid, c_v_grid, post_all.T, levels=8, linewidths=0.8, colors="k")
+plt.clabel(cs_joint, inline=True, fontsize=7)
+plt.colorbar(pcm_joint, shrink=0.8, pad=0.06, label="Posterior probability (discrete)")
+plt.xlabel("m_v (1/kPa)"); plt.ylabel("c_v (m^2/day)")
+plt.title("Posterior joint (m_v, c_v | y) — all data")
 show_and_save(os.path.join(SAVE_DIR, "fig_joint_posterior_heatmap.png"))
 
-# 2) k=1 3D View + Explanation
-draw_posterior_3d(1, OBSERVATION_TIMES[:1], OBSERVED_SETTLEMENTS[:1], "k1_post_surface.png")
+# B) k=1 3D + top-down
+post_k1 = post_k_cache[1]
+M1, C1 = np.meshgrid(m_v_grid, c_v_grid, indexing="ij")
+Z1 = post_k1
+mv_mean_k1 = float(np.sum(Z1 * m_v_grid[:, None]))
+cv_mean_k1 = float(np.sum(Z1 * c_v_grid[None, :]))
+i_map1, j_map1 = np.unravel_index(np.argmax(Z1), Z1.shape)
+mv_map_k1, cv_map_k1 = float(m_v_grid[i_map1]), float(c_v_grid[j_map1])
 
-# 3) k=4 3D View + Explanation
-draw_posterior_3d(4, OBSERVATION_TIMES, OBSERVED_SETTLEMENTS, "k4_post_surface.png")
+fig1 = plt.figure(figsize=(10.5, 6.5))
+ax3d_1 = fig1.add_subplot(121, projection="3d")
+surf1 = ax3d_1.plot_surface(M1, C1, Z1, rstride=3, cstride=3, linewidth=0.0, antialiased=True, alpha=0.95, cmap="viridis")
+ax3d_1.contour(M1, C1, Z1, zdir='z', offset=0, cmap="viridis", levels=8)
+ax3d_1.set_title("k=1 Normalized Posterior — 3D Surface")
+ax3d_1.set_xlabel("m_v (1/kPa)"); ax3d_1.set_ylabel("c_v (m^2/day)"); ax3d_1.set_zlabel("p(m_v,c_v | y₁)")
+fig1.colorbar(surf1, ax=ax3d_1, shrink=0.65, pad=0.08)
+ax3d_1.scatter(mv_map_k1, cv_map_k1, Z1[i_map1, j_map1], marker="^", s=60, label="MAP (▲)")
+ax3d_1.scatter(mv_mean_k1, cv_mean_k1, Z1[np.argmin(abs(m_v_grid - mv_mean_k1)),
+                                         np.argmin(abs(c_v_grid - cv_mean_k1))],
+               marker="x", s=60, label="Mean (×)")
+ax3d_1.legend(loc="upper left", fontsize=8)
 
-# 4) m_v: Prior vs Posterior (all data)
-MARG_M_ALL = np.sum(POST_ALL, axis=1)
-prior_mv_pdf = np.array([lognormal_pdf(x, MU_LOG_M, LOG_SD_M) for x in M_V_GRID])
-prior_mv_pdf /= np.trapz(prior_mv_pdf, M_V_GRID)
-post_mv_dens = pmf_to_density(M_V_GRID, MARG_M_ALL)
+ax2d_1 = fig1.add_subplot(122)
+pcm1 = ax2d_1.pcolormesh(M1, C1, Z1, shading="auto", cmap="viridis")
+cs1 = ax2d_1.contour(m_v_grid, c_v_grid, Z1.T, levels=8, linewidths=0.8, colors="k")
+ax2d_1.clabel(cs1, inline=True, fontsize=7)
+ax2d_1.scatter([mv_map_k1], [cv_map_k1], marker="^", s=70, label="MAP")
+ax2d_1.scatter([mv_mean_k1], [cv_mean_k1], marker="x", s=70, label="Mean")
+ax2d_1.set_title("Top-down with colormap + contours (k=1)")
+ax2d_1.set_xlabel("m_v (1/kPa)")
+ax2d_1.set_ylabel("c_v (m^2/day)")
+fig1.colorbar(pcm1, ax=ax2d_1, shrink=0.75, pad=0.06)
+ax2d_1.legend(loc="upper left", fontsize=8)
+show_and_save(os.path.join(SAVE_DIR, "k1_post_surface.png"))
+
+# C) k=4 3D + top-down
+Z4 = post_all
+mv_mean_k4 = float(np.sum(Z4 * m_v_grid[:, None]))
+cv_mean_k4 = float(np.sum(Z4 * c_v_grid[None, :]))
+i_map4, j_map4 = np.unravel_index(np.argmax(Z4), Z4.shape)
+mv_map_k4, cv_map_k4 = float(m_v_grid[i_map4]), float(c_v_grid[j_map4])
+M4, C4 = np.meshgrid(m_v_grid, c_v_grid, indexing="ij")
+
+fig2 = plt.figure(figsize=(10.5, 6.5))
+ax3d_4 = fig2.add_subplot(121, projection="3d")
+surf4 = ax3d_4.plot_surface(M4, C4, Z4, rstride=3, cstride=3, linewidth=0.0, antialiased=True, alpha=0.95, cmap="viridis")
+ax3d_4.contour(M4, C4, Z4, zdir='z', offset=0, cmap="viridis", levels=8)
+ax3d_4.set_title("k=4 Normalized Posterior — 3D Surface")
+ax3d_4.set_xlabel("m_v (1/kPa)"); ax3d_4.set_ylabel("c_v (m^2/day)"); ax3d_4.set_zlabel("p(m_v,c_v | y)")
+fig2.colorbar(surf4, ax=ax3d_4, shrink=0.65, pad=0.08)
+ax3d_4.scatter(mv_map_k4, cv_map_k4, Z4[i_map4, j_map4], marker="^", s=60, label="MAP (▲)")
+ax3d_4.scatter(mv_mean_k4, cv_mean_k4, Z4[np.argmin(abs(m_v_grid - mv_mean_k4)),
+                                         np.argmin(abs(c_v_grid - cv_mean_k4))],
+               marker="x", s=60, label="Mean (×)")
+ax3d_4.legend(loc="upper left", fontsize=8)
+
+ax2d_4 = fig2.add_subplot(122)
+pcm4 = ax2d_4.pcolormesh(M4, C4, Z4, shading="auto", cmap="viridis")
+cs4 = ax2d_4.contour(m_v_grid, c_v_grid, Z4.T, levels=8, linewidths=0.8, colors="k")
+ax2d_4.clabel(cs4, inline=True, fontsize=7)
+ax2d_4.scatter([mv_map_k4], [cv_map_k4], marker="^", s=70, label="MAP")
+ax2d_4.scatter([mv_mean_k4], [cv_mean_k4], marker="x", s=70, label="Mean")
+ax2d_4.set_title("Top-down with colormap + contours (k=4)")
+ax2d_4.set_xlabel("m_v (1/kPa)")
+ax2d_4.set_ylabel("c_v (m^2/day)")
+fig2.colorbar(pcm4, ax=ax2d_4, shrink=0.75, pad=0.06)
+ax2d_4.legend(loc="upper left", fontsize=8)
+show_and_save(os.path.join(SAVE_DIR, "k4_post_surface.png"))
+
+# D) m_v prior vs posterior (all data) — posterior CrI only
 plt.figure()
-plt.plot(M_V_GRID, prior_mv_pdf, label="Prior Density")
-plt.plot(M_V_GRID, post_mv_dens, label="Posterior Density (All Data)")
-mv_lo_all = discrete_quantile(M_V_GRID, MARG_M_ALL, 0.025)
-mv_hi_all = discrete_quantile(M_V_GRID, MARG_M_ALL, 0.975)
-plt.axvline(mv_lo_all, linestyle=":", label="Post 95% Lower")
-plt.axvline(mv_hi_all, linestyle=":", label="Post 95% Upper")
-plt.xlabel("m_v (1/kPa)")
-plt.ylabel("Density")
-plt.title("m_v: Prior vs Posterior (All Data)")
+prior_mv_pdf = np.array([lognormal_pdf(x, mu_log_m, sigma_log_m) for x in m_v_grid])
+prior_mv_pdf = prior_mv_pdf / np.trapezoid(prior_mv_pdf, m_v_grid)
+post_mv_dens = pmf_to_density(m_v_grid, marg_m_all)
+plt.plot(m_v_grid, prior_mv_pdf, label="Prior density")
+plt.plot(m_v_grid, post_mv_dens, label="Posterior density (all data)")
+plt.axvline(discrete_quantile(m_v_grid, marg_m_all, 0.025), linestyle=":", label="Post 95% lo (all)")
+plt.axvline(discrete_quantile(m_v_grid, marg_m_all, 0.975), linestyle=":", label="Post 95% hi (all)")
+plt.xlabel("m_v (1/kPa)"); plt.ylabel("Density"); plt.title("m_v: Prior vs Posterior (all data)")
 plt.legend(fontsize=8, loc="upper right")
 show_and_save(os.path.join(SAVE_DIR, "fig_mv_prior_posterior.png"))
 
-# 5) c_v: Prior vs Posterior (all data)
-MARG_C_ALL = np.sum(POST_ALL, axis=0)
-prior_cv_pdf = np.array([lognormal_pdf(x, MU_LOG_C, LOG_SD_C) for x in C_V_GRID])
-prior_cv_pdf /= np.trapz(prior_cv_pdf, C_V_GRID)
-post_cv_dens = pmf_to_density(C_V_GRID, MARG_C_ALL)
+# E) c_v prior vs posterior (all data) — posterior CrI only
 plt.figure()
-plt.plot(C_V_GRID, prior_cv_pdf, label="Prior Density")
-plt.plot(C_V_GRID, post_cv_dens, label="Posterior Density (All Data)")
-cv_lo_all = discrete_quantile(C_V_GRID, MARG_C_ALL, 0.025)
-cv_hi_all = discrete_quantile(C_V_GRID, MARG_C_ALL, 0.975)
-plt.axvline(cv_lo_all, linestyle=":", label="Post 95% Lower")
-plt.axvline(cv_hi_all, linestyle=":", label="Post 95% Upper")
-plt.xlabel("c_v (m²/day)")
-plt.ylabel("Density")
-plt.title("c_v: Prior vs Posterior (All Data)")
+prior_cv_pdf = np.array([lognormal_pdf(x, mu_log_c, sigma_log_c) for x in c_v_grid])
+prior_cv_pdf = prior_cv_pdf / np.trapezoid(prior_cv_pdf, c_v_grid)
+post_cv_dens = pmf_to_density(c_v_grid, marg_c_all)
+plt.plot(c_v_grid, prior_cv_pdf, label="Prior density")
+plt.plot(c_v_grid, post_cv_dens, label="Posterior density (all data)")
+plt.axvline(discrete_quantile(c_v_grid, marg_c_all, 0.025), linestyle=":", label="Post 95% lo (all)")
+plt.axvline(discrete_quantile(c_v_grid, marg_c_all, 0.975), linestyle=":", label="Post 95% hi (all)")
+plt.xlabel("c_v (m^2/day)"); plt.ylabel("Density"); plt.title("c_v: Prior vs Posterior (all data)")
 plt.legend(fontsize=8, loc="upper right")
 show_and_save(os.path.join(SAVE_DIR, "fig_cv_prior_posterior.png"))
 
-# 6) Summary equation
-plt.figure(figsize=(11, 5))
-ax = plt.gca()
-ax.axis("off")
-main_eq = (r"$p(\theta \mid \mathbf{y}) \propto "
-           r"\left[ \prod_i \phi \left( \frac{y_i - s(t_i; \theta)}{\sigma_e} \right) \right] p(\theta), "
-           r"\theta = (m_v, c_v)$")
-ax.text(0.5, 0.65, main_eq, fontsize=24, ha="center", va="center",
+# F) Summary equation page
+plt.figure(figsize=(9.2, 5.2))
+ax = plt.gca(); ax.axis("off")
+main_eq = (r"$p(\theta\mid\mathbf{y}) \propto "
+           r"\left[\prod_i \phi\!\left(\frac{y_i - s(t_i;\theta)}{\sigma_e}\right)\right] p(\theta),\ "
+           r"\theta=(m_v,c_v)$")
+ax.text(0.5, 0.65, main_eq, fontsize=18, ha="center", va="center",
         bbox=dict(boxstyle="round,pad=0.35", ec="black", fc="none", lw=1.6))
-s_eq = (r"$s(t_i; \theta) = m_v \, \Delta \sigma' \, H \, U \left( \frac{c_v \, t_i}{(H/2)^2} \right), "
-        r"U(T_v) \approx 1 - \frac{8}{\pi^2} \exp \left( -\frac{\pi^2}{4} T_v \right)$")
-ax.text(0.5, 0.30, s_eq, fontsize=21, ha="center", va="center")
-ax.set_title("Bayesian Updating Equation (Summary)", fontsize=14, pad=12)
+with_line = (
+    r"$s(t;\theta)=m_v\,\Delta\sigma'\,H\,U\!\left(\frac{c_v\,t}{(H/2)^2}\right),\ "
+    r"U(T_v)\approx 1-\frac{8}{\pi^2}\exp\!\left(-\frac{\pi^2}{4}T_v\right).$"
+)
+ax.text(0.5, 0.30, with_line, fontsize=14, ha="center", va="center")
+ax.set_title("Bayesian Updating Equation (Summary)", fontsize=14, pad=8)
 show_and_save(os.path.join(SAVE_DIR, "equation_summary.png"))
 
-# 7) Parameter summary table
-summary_df = pd.DataFrame(PARAM_SUMMARY)
-plt.figure(figsize=(11.5, 6.0))
+# G) Parameter summary table
+summary_df = pd.DataFrame(rows_summary)
+plt.figure(figsize=(11.0, 6.0))
 plt.axis("off")
 plt.title("Parameter Summary (Prior and Sequential Posteriors)", fontsize=14, pad=12)
 
-df_display = summary_df.copy()
-for col in df_display.columns:
+df_show = summary_df.copy()
+def _fmt(col, name):
+    if name.startswith("m_v"):
+        return col.map(fmt_small)
+    if name.startswith("c_v"):
+        return col.map(fmt_std)
+    return col
+for col in df_show.columns:
     if col == "Stage":
         continue
-    df_display[col] = df_display[col].apply(lambda x: format_small(x) if col.startswith("m_v") else format_standard(x))
+    df_show[col] = _fmt(df_show[col], col)
 
-table = plt.table(cellText=df_display.values,
-                  colLabels=df_display.columns,
+table = plt.table(cellText=df_show.values,
+                  colLabels=df_show.columns,
                   loc="center",
                   cellLoc="center")
 table.auto_set_font_size(False)
@@ -682,13 +512,4 @@ table.set_fontsize(9)
 table.scale(1.05, 1.25)
 show_and_save(os.path.join(SAVE_DIR, "param_summary.png"))
 
-# 8) Executive Summary (last figure)
-draw_executive_summary()
-
-# Save prediction table
-df_predictions = pd.concat(TABLES, ignore_index=True)
-csv_path = os.path.join(SAVE_DIR, "sequential_predictions.csv")
-df_predictions.to_csv(csv_path, index=False)
-print(f"\nSaved prediction table: {csv_path}")
-
-print(f"\nAnalysis completed at {CURRENT_TIME}. Check {os.path.abspath(SAVE_DIR)} for results!")
+print("\nSaved to:", os.path.abspath(SAVE_DIR))
